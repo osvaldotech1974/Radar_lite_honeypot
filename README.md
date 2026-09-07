@@ -1,20 +1,14 @@
-# Radar LITE Honeypot
+# Honeypot Demo - Detección de Intrusos
 
-Un honeypot ligero en Python para detectar escaneos y conexiones sospechosas en la red local. 
-Proyecto desarrollado para prácticas de ciberseguridad y monitoreo.
+Sistema educativo en Python que simula un panel de login para registrar intentos de acceso.
 
-## ¿Qué hace?
-- Escucha en puertos comunes para atraer atacantes/bots
-- Registra IP, puerto, hora y tipo de conexión
-- Guarda todo en un log para análisis posterior
+## Características
+- 100% Python. Corre en PC y Pydroid 3
+- Aviso legal visible: Informa que es una demo
+- No almacena contraseñas. Solo IP, hora, usuario probado y User-Agent
+- Logs en `intentos_acceso.log`
 
-## Cómo usarlo
-1. Clonar repo: `git clone https://github.com/osvaldotech1974/Radar_lite_honeypot.git`
-2. Ejecutar: `python radar.py`
-3. Revisar logs: `logs.txt`
-
-## Objetivo
-Parte del portafolio para demostrar habilidades en Python + Ciberseguridad + Blue Team.
-
-## Autor
-Osvaldo - Tech1974
+## Uso
+Solo para fines educativos y de laboratorio.
+```bash
+python honeypot_demo.py
