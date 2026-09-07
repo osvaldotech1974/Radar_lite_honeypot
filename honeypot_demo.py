@@ -9,128 +9,128 @@ from collections import defaultdict
 from logging.handlers import RotatingFileHandler
 
 PORT = 8080
-LOG_FILE = "intentos_acceso.log"
+LOG_FILE = "access_attempts.log"
 DB_FILE = "honeypot.db"
-MAX_CONTENT_LENGTH = 1024 # Anti DoS
-MAX_INTENTOS = 5 # Bloquear tras 5 intentos
-VENTANA_TIEMPO = 600 # 10 minutos
+MAX_CONTENT_LENGTH = 1024  # Anti DoS
+MAX_ATTEMPTS = 5  # Block after 5 attempts
+TIME_WINDOW = 600  # 10 minutes
 
-# Configurar logging con rotación mínima
+# Configure logging with rotation
 log_dir = os.path.dirname(os.path.abspath(LOG_FILE)) or '.'
 if not os.access(log_dir, os.W_OK):
-    raise PermissionError(f"No hay permisos para escribir en {log_dir}")
+    raise PermissionError(f"No write permissions for directory: {log_dir}")
 
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
-# Evitar añadir handlers duplicados si el módulo se recarga
+# Avoid adding duplicate handlers if module is reloaded
 if not any(isinstance(h, RotatingFileHandler) and getattr(h, 'baseFilename', '') == os.path.abspath(LOG_FILE) for h in root_logger.handlers):
     handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5)
     formatter = logging.Formatter('[%(asctime)s] %(message)s', '%Y-%m-%d %H:%M:%S')
     handler.setFormatter(formatter)
     root_logger.addHandler(handler)
 
-# Memoria en RAM para contar intentos
-intentos_por_ip = defaultdict(list)
-ips_bloqueadas = set()
+# In-memory storage for counting attempts
+attempts_by_ip = defaultdict(list)
+blocked_ips = set()
 
 # --- SQLite helpers ---
 
 def init_db():
-    """Inicializar la base de datos y las tablas necesarias."""
+    """Initialize the database and required tables."""
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS intentos (
+            CREATE TABLE IF NOT EXISTS attempts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ip TEXT NOT NULL,
                 timestamp REAL NOT NULL,
-                usuario TEXT,
+                username TEXT,
                 user_agent TEXT
             )
             """
         )
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS ips_bloqueadas (
+            CREATE TABLE IF NOT EXISTS blocked_ips (
                 ip TEXT PRIMARY KEY,
-                fecha_bloqueo REAL NOT NULL
+                block_date REAL NOT NULL
             )
             """
         )
         conn.commit()
 
 
-def cargar_ips_bloqueadas_desde_db():
-    """Cargar las IPs bloqueadas en memoria desde la DB al iniciar."""
+def load_blocked_ips_from_db():
+    """Load blocked IPs into memory from database on startup."""
     with sqlite3.connect(DB_FILE) as conn:
-        cur = conn.execute("SELECT ip FROM ips_bloqueadas")
+        cur = conn.execute("SELECT ip FROM blocked_ips")
         rows = cur.fetchall()
         for row in rows:
-            ips_bloqueadas.add(row[0])
+            blocked_ips.add(row[0])
 
 
-def registrar_intento_db(ip, usuario, user_agent, ts):
-    """Guardar un intento en la tabla 'intentos'."""
+def register_attempt_db(ip, username, user_agent, ts):
+    """Save an attempt to the 'attempts' table."""
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
-            "INSERT INTO intentos (ip, timestamp, usuario, user_agent) VALUES (?,?,?,?)",
-            (ip, ts, usuario, user_agent)
+            "INSERT INTO attempts (ip, timestamp, username, user_agent) VALUES (?,?,?,?)",
+            (ip, ts, username, user_agent)
         )
         conn.commit()
 
 
-def bloquear_ip_db(ip):
-    """Persistir bloqueo en la tabla 'ips_bloqueadas' y agregar a memoria."""
-    ahora = time.time()
+def block_ip_db(ip):
+    """Persist block in the 'blocked_ips' table and add to memory."""
+    now = time.time()
     with sqlite3.connect(DB_FILE) as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO ips_bloqueadas (ip, fecha_bloqueo) VALUES (?,?)",
-            (ip, ahora)
+            "INSERT OR IGNORE INTO blocked_ips (ip, block_date) VALUES (?,?)",
+            (ip, now)
         )
         conn.commit()
-    ips_bloqueadas.add(ip)
+    blocked_ips.add(ip)
 
-# Inicializar DB y cargar bloqueos existentes
+# Initialize DB and load existing blocks
 init_db()
-cargar_ips_bloqueadas_desde_db()
+load_blocked_ips_from_db()
 
 class HoneypotHandler(BaseHTTPRequestHandler):
 
-    def esta_bloqueada(self, ip):
-        # Si ya está explícitamente bloqueada en memoria, devolver True inmediatamente
-        if ip in ips_bloqueadas:
+    def is_blocked(self, ip):
+        # If already explicitly blocked in memory, return True immediately
+        if ip in blocked_ips:
             return True
 
-        # Consultar intentos recientes desde la DB para reconstruir el estado (ventana de tiempo)
-        ahora = time.time()
-        cutoff = ahora - VENTANA_TIEMPO
+        # Query recent attempts from DB to rebuild state (time window)
+        now = time.time()
+        cutoff = now - TIME_WINDOW
         with sqlite3.connect(DB_FILE) as conn:
             cur = conn.execute(
-                "SELECT timestamp FROM intentos WHERE ip = ? AND timestamp >= ? ORDER BY timestamp",
+                "SELECT timestamp FROM attempts WHERE ip = ? AND timestamp >= ? ORDER BY timestamp",
                 (ip, cutoff)
             )
             rows = cur.fetchall()
-            # rows es lista de tuplas [(timestamp,),(timestamp,)...]
-            tiempos = [r[0] for r in rows]
+            # rows is list of tuples [(timestamp,),(timestamp,)...]
+            timestamps = [r[0] for r in rows]
 
-        # Actualizar memoria con los intentos recientes
-        intentos_por_ip[ip] = tiempos
+        # Update memory with recent attempts
+        attempts_by_ip[ip] = timestamps
 
-        # Si la cuenta excede el máximo, bloquear y persistir
-        if len(intentos_por_ip[ip]) >= MAX_INTENTOS:
-            bloquear_ip_db(ip)
+        # If count exceeds maximum, block and persist
+        if len(attempts_by_ip[ip]) >= MAX_ATTEMPTS:
+            block_ip_db(ip)
             return True
 
         return False
 
     def do_GET(self):
         ip = self.client_address[0]
-        if self.esta_bloqueada(ip):
+        if self.is_blocked(ip):
             self.send_response(403)
             self.send_header("Content-type", "text/html; charset=utf-8")
             self.end_headers()
-            self.wfile.write(b"<h1>403 Forbidden</h1><p>IP bloqueada por multiples intentos fallidos.</p>")
-            logging.warning(f"IP BLOQUEADA intento acceso: {ip}")
+            self.wfile.write(b"<h1>403 Forbidden</h1><p>IP blocked due to multiple failed attempts.</p>")
+            logging.warning(f"BLOCKED IP access attempt: {ip}")
             return
 
         self.send_response(200)
@@ -138,14 +138,14 @@ class HoneypotHandler(BaseHTTPRequestHandler):
         self.end_headers()
         html = """
         <!DOCTYPE html>
-        <html><head><title>Sistema Demo - Seguridad</title></head>
+        <html><head><title>Demo System - Security</title></head>
         <body style="font-family:sans-serif; text-align:center; padding-top:50px;">
-            <p style="color:red; font-size:12px;">AVISO: Sistema de demostracion. Se registran IPs con fines de seguridad.</p>
-            <h2>Panel de Administracion - DEMO</h2>
+            <p style="color:red; font-size:12px;">NOTICE: Demo system. IPs are recorded for security purposes.</p>
+            <h2>Administration Panel - DEMO</h2>
             <form method="POST">
-                <input type="text" name="user" placeholder="Usuario" required><br><br>
-                <input type="password" name="pass" placeholder="Contrasena" required><br><br>
-                <button type="submit">Ingresar</button>
+                <input type="text" name="user" placeholder="Username" required><br><br>
+                <input type="password" name="pass" placeholder="Password" required><br><br>
+                <button type="submit">Login</button>
             </form>
         </body></html>
         """
@@ -153,44 +153,44 @@ class HoneypotHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         ip = self.client_address[0]
-        if self.esta_bloqueada(ip):
+        if self.is_blocked(ip):
             self.send_response(403)
             self.end_headers()
             return
 
         try:
-            # Validar Content-Type mínimo
+            # Validate minimum Content-Type
             content_type = self.headers.get('Content-Type', '')
             if not content_type.startswith('application/x-www-form-urlencoded'):
                 self.send_error(400, "Bad Request - unsupported Content-Type")
-                logging.warning(f"Rechazado POST por Content-Type no soportado | IP: {ip} | CT: {content_type}")
+                logging.warning(f"POST rejected for unsupported Content-Type | IP: {ip} | CT: {content_type}")
                 return
 
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > MAX_CONTENT_LENGTH:
                 self.send_error(413, "Payload Too Large")
-                logging.warning(f"POSIBLE DOS | IP: {ip} | Size: {content_length}")
+                logging.warning(f"POSSIBLE DOS | IP: {ip} | Size: {content_length}")
                 return
 
             post_data = self.rfile.read(content_length).decode('utf-8')
-            datos = urllib.parse_qs(post_data)
-            usuario = datos.get('user', [''])[0]
-            ua = self.headers.get('User-Agent', 'Desconocido')
+            data = urllib.parse_qs(post_data)
+            username = data.get('user', [''])[0]
+            ua = self.headers.get('User-Agent', 'Unknown')
 
             ts = time.time()
-            # Registrar intento en DB (persistencia requerida)
-            registrar_intento_db(ip, usuario, ua, ts)
+            # Register attempt in DB (persistence required)
+            register_attempt_db(ip, username, ua, ts)
 
-            # Reconstruir / actualizar intentos recientes desde la DB y verificar bloqueo
-            bloqueada = self.esta_bloqueada(ip)
+            # Rebuild / update recent attempts from DB and verify block
+            is_blocked = self.is_blocked(ip)
 
-            intento_n = len(intentos_por_ip[ip])
-            log_msg = f"INTENTO {intento_n}/{MAX_INTENTOS} | IP: {ip} | Usuario: '{usuario}' | UA: {ua}"
+            attempt_n = len(attempts_by_ip[ip])
+            log_msg = f"ATTEMPT {attempt_n}/{MAX_ATTEMPTS} | IP: {ip} | Username: '{username}' | UA: {ua}"
             logging.info(log_msg)
             print(f"[!] {log_msg}")
 
-            if bloqueada:
-                logging.critical(f"IP BLOQUEADA: {ip} por exceder {MAX_INTENTOS} intentos")
+            if is_blocked:
+                logging.critical(f"IP BLOCKED: {ip} for exceeding {MAX_ATTEMPTS} attempts")
 
         except ValueError:
             self.send_error(400, "Bad Request")
@@ -202,15 +202,15 @@ class HoneypotHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"<h3>Acceso denegado. Evento registrado.</h3><a href='/'>Volver</a>")
+        self.wfile.write(b"<h3>Access denied. Event recorded.</h3><a href='/'>Back</a>")
 
 if __name__ == "__main__":
     try:
-        print(f"[+] Honeypot PRO v3.1 corriendo en puerto {PORT}")
-        print(f"[+] Bloqueo automatico tras {MAX_INTENTOS} intentos en {VENTANA_TIEMPO/60} min")
+        print(f"[+] Honeypot PRO v3.1 running on port {PORT}")
+        print(f"[+] Automatic block after {MAX_ATTEMPTS} attempts in {TIME_WINDOW/60} min")
         server = ThreadingHTTPServer(("0.0.0.0", PORT), HoneypotHandler)
         server.serve_forever()
     except OSError as e:
-        print(f"[ERROR] No se pudo iniciar el servidor en puerto {PORT}: {e}")
+        print(f"[ERROR] Could not start server on port {PORT}: {e}")
     except KeyboardInterrupt:
-        print("\n[+] Servidor detenido manualmente")
+        print("\n[+] Server stopped manually")
