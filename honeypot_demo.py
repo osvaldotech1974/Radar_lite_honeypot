@@ -4,11 +4,13 @@ import datetime
 import os
 import logging
 import time
+import sqlite3
 from collections import defaultdict
 from logging.handlers import RotatingFileHandler
 
 PORT = 8080
 LOG_FILE = "intentos_acceso.log"
+DB_FILE = "honeypot.db"
 MAX_CONTENT_LENGTH = 1024 # Anti DoS
 MAX_INTENTOS = 5 # Bloquear tras 5 intentos
 VENTANA_TIEMPO = 600 # 10 minutos
@@ -31,20 +33,94 @@ if not any(isinstance(h, RotatingFileHandler) and getattr(h, 'baseFilename', '')
 intentos_por_ip = defaultdict(list)
 ips_bloqueadas = set()
 
+# --- SQLite helpers ---
+
+def init_db():
+    """Inicializar la base de datos y las tablas necesarias."""
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS intentos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                usuario TEXT,
+                user_agent TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ips_bloqueadas (
+                ip TEXT PRIMARY KEY,
+                fecha_bloqueo REAL NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+
+def cargar_ips_bloqueadas_desde_db():
+    """Cargar las IPs bloqueadas en memoria desde la DB al iniciar."""
+    with sqlite3.connect(DB_FILE) as conn:
+        cur = conn.execute("SELECT ip FROM ips_bloqueadas")
+        rows = cur.fetchall()
+        for row in rows:
+            ips_bloqueadas.add(row[0])
+
+
+def registrar_intento_db(ip, usuario, user_agent, ts):
+    """Guardar un intento en la tabla 'intentos'."""
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute(
+            "INSERT INTO intentos (ip, timestamp, usuario, user_agent) VALUES (?,?,?,?)",
+            (ip, ts, usuario, user_agent)
+        )
+        conn.commit()
+
+
+def bloquear_ip_db(ip):
+    """Persistir bloqueo en la tabla 'ips_bloqueadas' y agregar a memoria."""
+    ahora = time.time()
+    with sqlite3.connect(DB_FILE) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO ips_bloqueadas (ip, fecha_bloqueo) VALUES (?,?)",
+            (ip, ahora)
+        )
+        conn.commit()
+    ips_bloqueadas.add(ip)
+
+# Inicializar DB y cargar bloqueos existentes
+init_db()
+cargar_ips_bloqueadas_desde_db()
+
 class HoneypotHandler(BaseHTTPRequestHandler):
 
     def esta_bloqueada(self, ip):
-        # Si ya está explícitamente bloqueada, devolver True inmediatamente
+        # Si ya está explícitamente bloqueada en memoria, devolver True inmediatamente
         if ip in ips_bloqueadas:
             return True
 
-        # Limpiar intentos viejos fuera de la ventana
+        # Consultar intentos recientes desde la DB para reconstruir el estado (ventana de tiempo)
         ahora = time.time()
-        intentos_por_ip[ip] = [t for t in intentos_por_ip[ip] if ahora - t < VENTANA_TIEMPO]
+        cutoff = ahora - VENTANA_TIEMPO
+        with sqlite3.connect(DB_FILE) as conn:
+            cur = conn.execute(
+                "SELECT timestamp FROM intentos WHERE ip = ? AND timestamp >= ? ORDER BY timestamp",
+                (ip, cutoff)
+            )
+            rows = cur.fetchall()
+            # rows es lista de tuplas [(timestamp,),(timestamp,)...]
+            tiempos = [r[0] for r in rows]
 
+        # Actualizar memoria con los intentos recientes
+        intentos_por_ip[ip] = tiempos
+
+        # Si la cuenta excede el máximo, bloquear y persistir
         if len(intentos_por_ip[ip]) >= MAX_INTENTOS:
-            ips_bloqueadas.add(ip)
+            bloquear_ip_db(ip)
             return True
+
         return False
 
     def do_GET(self):
@@ -101,14 +177,19 @@ class HoneypotHandler(BaseHTTPRequestHandler):
             usuario = datos.get('user', [''])[0]
             ua = self.headers.get('User-Agent', 'Desconocido')
 
-            # Registrar intento (no guardamos contraseñas en logs)
-            intentos_por_ip[ip].append(time.time())
+            ts = time.time()
+            # Registrar intento en DB (persistencia requerida)
+            registrar_intento_db(ip, usuario, ua, ts)
+
+            # Reconstruir / actualizar intentos recientes desde la DB y verificar bloqueo
+            bloqueada = self.esta_bloqueada(ip)
+
             intento_n = len(intentos_por_ip[ip])
             log_msg = f"INTENTO {intento_n}/{MAX_INTENTOS} | IP: {ip} | Usuario: '{usuario}' | UA: {ua}"
             logging.info(log_msg)
             print(f"[!] {log_msg}")
 
-            if intento_n >= MAX_INTENTOS:
+            if bloqueada:
                 logging.critical(f"IP BLOQUEADA: {ip} por exceder {MAX_INTENTOS} intentos")
 
         except ValueError:
