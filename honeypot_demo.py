@@ -20,9 +20,10 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# Validar permisos de escritura
-if not os.access(os.path.dirname(os.path.abspath(LOG_FILE)) or '.', os.W_OK):
-    raise PermissionError(f"No hay permisos para escribir en {LOG_FILE}")
+# 3. Validación de permisos MEJORADA por Copilot
+log_dir = os.path.dirname(os.path.abspath(LOG_FILE)) or '.'
+if not os.access(log_dir, os.W_OK):
+    raise PermissionError(f"No hay permisos para escribir en {log_dir}")
 
 # Memoria en RAM para contar intentos
 intentos_por_ip = defaultdict(list)
@@ -35,7 +36,7 @@ class HoneypotHandler(BaseHTTPRequestHandler):
         ahora = time.time()
         intentos_por_ip[ip] = [t for t in intentos_por_ip[ip] if ahora - t < VENTANA_TIEMPO]
 
-        if len(intentos_por_ip[ip]) >= MAX_INTENTOS:
+        if len(intentos_por_ip[ip]) >= MAX_INTENTOS: # 1. Arreglado: tenia :
             ips_bloqueadas.add(ip)
             return True
         return ip in ips_bloqueadas
@@ -68,7 +69,7 @@ class HoneypotHandler(BaseHTTPRequestHandler):
         """
         self.wfile.write(html.encode("utf-8"))
 
-    def do_POST(self):
+    def do_POST(self): # 2. Funcion completa ahora
         ip = self.client_address[0]
         if self.esta_bloqueada(ip):
             self.send_response(403)
@@ -83,7 +84,7 @@ class HoneypotHandler(BaseHTTPRequestHandler):
                 return
 
             post_data = self.rfile.read(content_length).decode('utf-8')
-            datos = urllib.parse.parse_qs(post_data)
+            datos = urllib.parse_qs(post_data)
             usuario = datos.get('user', [''])[0]
             ua = self.headers.get('User-Agent', 'Desconocido')
 
@@ -94,4 +95,28 @@ class HoneypotHandler(BaseHTTPRequestHandler):
             logging.info(log_msg)
             print(f"[!] {log_msg}")
 
-            if intento_n >= MAX_INTENTOS
+            if intento_n >= MAX_INTENTOS:
+                logging.critical(f"IP BLOQUEADA: {ip} por exceder {MAX_INTENTOS} intentos")
+
+        except ValueError:
+            self.send_error(400, "Bad Request")
+        except Exception as e:
+            logging.error(f"{ip} | Error: {e}")
+            self.send_error(500, "Internal Server Error")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"<h3>Acceso denegado. Evento registrado.</h3><a href='/'>Volver</a>")
+
+if __name__ == "__main__":
+    try:
+        print(f"[+] Honeypot PRO v3.1 corriendo en puerto {PORT}")
+        print(f"[+] Bloqueo automatico tras {MAX_INTENTOS} intentos en {VENTANA_TIEMPO/60} min")
+        server = HTTPServer(("0.0.0.0", PORT), HoneypotHandler)
+        server.serve_forever()
+    except OSError as e:
+        print(f"[ERROR] No se pudo iniciar el servidor en puerto {PORT}: {e}")
+    except KeyboardInterrupt:
+        print("\n[+] Servidor detenido manualmente")
