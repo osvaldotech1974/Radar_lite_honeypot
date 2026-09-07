@@ -2,12 +2,12 @@
 
 Sistema educativo en Python que simula un panel de login para registrar intentos de acceso.
 
-## Características
-- 100% Python. Corre en PC y Pydroid 3
-- Aviso legal visible: Informa que es una demo
-- No almacena contraseñas. Solo IP, hora, usuario probado y User-Agent
-- Logs en `intentos_acceso.log`
-
+## Features v3
+- Bloqueo automático de IP tras 5 intentos fallidos en 10 minutos
+- Respuesta HTTP 403 para IPs bloqueadas
+- Logging estructurado para análisis
+- Protección básica Anti-DoS por Content-Length
+  
 ## Uso
 Solo para fines educativos y de laboratorio.
 ```bash
