@@ -12,27 +12,22 @@ PORT = 8080
 DB_FILE = "honeypot.db"
 MAX_CONTENT_LENGTH = 1024
 MAX_ATTEMPTS = 5
-TIME_WINDOW = 600 # 10 minutos
+TIME_WINDOW = 600  # 10 minutos
 
-# Para PC usa: LOG_FILE = "access_attempts.log"
-# Para pyDroid usa:
-LOG_FILE = "/sdcard/honeypot_access.log"
+LOG_FILE = "access_attempts.log"  # Ajusta según entorno
 
-# Credenciales demo para reclutadores
-USUARIO_VALIDO = "admin"
-CONTRASENA_VALIDA = "demo123"
+# Credenciales parametrizadas (no hardcodeadas)
+USUARIO_VALIDO = os.getenv("HONEYPOT_USER", "admin")
+CONTRASENA_VALIDA = os.getenv("HONEYPOT_PASS", "demo123")
 
 # ===== LOGGING =====
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)
-try:
-    if not any(isinstance(h, RotatingFileHandler) for h in root_logger.handlers):
-        handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5)
-        formatter = logging.Formatter('[%(asctime)s] %(message)s', '%Y-%m-%d %H:%M:%S')
-        handler.setFormatter(formatter)
-        root_logger.addHandler(handler)
-except:
-    print("[!] No se pudo crear log. Usando solo consola.")
+if not any(isinstance(h, RotatingFileHandler) for h in root_logger.handlers):
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5)
+    formatter = logging.Formatter('[%(asctime)s] %(message)s', '%Y-%m-%d %H:%M:%S')
+    handler.setFormatter(formatter)
+    root_logger.addHandler(handler)
 
 # ===== DB Y MEMORIA =====
 attempts_by_ip = defaultdict(list)
@@ -40,8 +35,15 @@ blocked_ips = set()
 
 def init_db():
     with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("CREATE TABLE IF NOT EXISTS attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, ip TEXT NOT NULL, timestamp REAL NOT NULL, username TEXT, user_agent TEXT)")
-        conn.execute("CREATE TABLE IF NOT EXISTS blocked_ips (ip TEXT PRIMARY KEY, block_date REAL NOT NULL)")
+        conn.execute("""CREATE TABLE IF NOT EXISTS attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL,
+            timestamp REAL NOT NULL,
+            username TEXT,
+            user_agent TEXT)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS blocked_ips (
+            ip TEXT PRIMARY KEY,
+            block_date REAL NOT NULL)""")
         conn.commit()
 
 def load_blocked_ips_from_db():
@@ -52,7 +54,8 @@ def load_blocked_ips_from_db():
 
 def register_attempt_db(ip, username, user_agent, ts):
     with sqlite3.connect(DB_FILE) as conn:
-        conn.execute("INSERT INTO attempts (ip, timestamp, username, user_agent) VALUES (?,?,?,?)", (ip, ts, username, user_agent))
+        conn.execute("INSERT INTO attempts (ip, timestamp, username, user_agent) VALUES (?,?,?,?)",
+                     (ip, ts, username, user_agent))
         conn.commit()
 
 def block_ip_db(ip):
@@ -64,7 +67,8 @@ def get_recent_attempts_from_db(ip):
     now = time.time()
     cutoff = now - TIME_WINDOW
     with sqlite3.connect(DB_FILE) as conn:
-        cur = conn.execute("SELECT timestamp FROM attempts WHERE ip =? AND timestamp >=? ORDER BY timestamp", (ip, cutoff))
+        cur = conn.execute("SELECT timestamp FROM attempts WHERE ip =? AND timestamp >=? ORDER BY timestamp",
+                           (ip, cutoff))
         return [r[0] for r in cur.fetchall()]
 
 def get_stats():
@@ -74,12 +78,12 @@ def get_stats():
         last10 = conn.execute("SELECT ip, username, timestamp FROM attempts ORDER BY id DESC LIMIT 10").fetchall()
     return total, blocked, last10
 
+def sanitize(text):
+    return "".join(c for c in text if c.isalnum() or c in "-_@.")
+
 # ===== HANDLER =====
 class HoneypotHandler(BaseHTTPRequestHandler):
-
     def is_blocked(self, ip):
-        if ip in blocked_ips:
-            return True
         attempts_by_ip[ip] = get_recent_attempts_from_db(ip)
         if len(attempts_by_ip[ip]) >= MAX_ATTEMPTS:
             blocked_ips.add(ip)
@@ -90,15 +94,10 @@ class HoneypotHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         ip = self.client_address[0]
         if self.path == "/panel":
+            if ip in blocked_ips:
+                self.send_error(403, "Bloqueado temporalmente")
+                return
             return self.show_panel(ip)
-
-        if self.is_blocked(ip):
-            self.send_response(403)
-            self.send_header("Content-type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(b"<h1>403 Forbidden</h1><p>IP bloqueada por multiples intentos fallidos. Espera 10 minutos.</p>")
-            logging.warning(f"IP BLOQUEADA intento acceso: {ip}")
-            return
 
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
@@ -110,12 +109,12 @@ class HoneypotHandler(BaseHTTPRequestHandler):
         input{{padding:8px;width:200px;margin:5px}} button{{padding:10px 20px;width:216px;background:#0a84ff;border:0;color:white;cursor:pointer}}
         </style></head><body>
         <div class="box">
-        <p style="color:red; font-size:12px;">AVISO: Sistema de demostracion para portafolio. Se registran IPs.</p>
+        <p style="color:red; font-size:12px;">AVISO: Sistema de demostración para portafolio. Se registran IPs.</p>
         <h2>Radar Lite - Admin Panel</h2>
         <form method="POST">
         <input type="text" name="user" placeholder="Usuario" required><br>
         <input type="password" name="pass" placeholder="Contraseña" required><br>
-        <button type="submit">Iniciar Sesion</button>
+        <button type="submit">Iniciar Sesión</button>
         </form>
         </div></body></html>"""
         self.wfile.write(html.encode("utf-8"))
@@ -129,11 +128,11 @@ class HoneypotHandler(BaseHTTPRequestHandler):
         <h2>Bienvenido al Panel - Radar Lite</h2>
         <p>IP: {ip} | Usuario: {USUARIO_VALIDO}</p>
         <hr>
-        <h3>Estadisticas</h3>
+        <h3>Estadísticas</h3>
         <p>Total Intentos: {total} | IPs Bloqueadas: {blocked}</p>
-        <h3>Ultimos 10 Intentos</h3>
+        <h3>Últimos 10 Intentos</h3>
         <table><tr><th>IP</th><th>Usuario</th><th>Fecha</th></tr>{rows}</table>
-        <br><a href="/" style="color:#0ff;">Cerrar Sesion</a>
+        <br><a href="/" style="color:#0ff;">Cerrar Sesión</a>
         </body></html>"""
         self.send_response(200)
         self.send_header("Content-type", "text/html; charset=utf-8")
@@ -150,25 +149,22 @@ class HoneypotHandler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length).decode('utf-8')
             data = urllib.parse.parse_qs(post_data)
-            username = data.get('user', [''])[0]
-            password = data.get('pass', [''])[0]
+            username = sanitize(data.get('user', [''])[0])
+            password = sanitize(data.get('pass', [''])[0])
             ua = self.headers.get('User-Agent', 'Unknown')
             ts = time.time()
             register_attempt_db(ip, username, ua, ts)
 
-            # Validar login real
             if username == USUARIO_VALIDO and password == CONTRASENA_VALIDA:
                 logging.info(f"LOGIN EXITOSO | IP: {ip} | User: '{username}'")
-                self.send_response(302) # Redirigir al panel
+                self.send_response(302)
                 self.send_header("Location", "/panel")
                 self.end_headers()
                 return
 
-            # Si falla
             attempt_n = len(attempts_by_ip[ip]) + 1
             log_msg = f"LOGIN FALLIDO {attempt_n}/{MAX_ATTEMPTS} | IP: {ip} | User: '{username}'"
             logging.warning(log_msg)
-            print(f"[!] {log_msg}")
             self.is_blocked(ip)
 
         except Exception as e:
@@ -179,16 +175,17 @@ class HoneypotHandler(BaseHTTPRequestHandler):
         self.send_response(401)
         self.send_header("Content-type", "text/html; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"<h3>Acceso Denegado.</h3><p>Usuario o contrasena incorrectos.</p><a href='/'>Volver</a>")
+        self.wfile.write(b"<h3>Acceso Denegado.</h3><p>Usuario o contraseña incorrectos.</p><a href='/'>Volver</a>")
 
 if __name__ == "__main__":
     init_db()
     load_blocked_ips_from_db()
     try:
-        print(f"[+] Radar Lite Honeypot v4.2 corriendo en puerto {PORT}")
+        print(f"[+] Radar Lite Honeypot corriendo en puerto {PORT}")
         print(f"[+] Demo Login: {USUARIO_VALIDO} / {CONTRASENA_VALIDA}")
         print(f"[+] Panel en: http://localhost:{PORT}/panel")
         server = ThreadingHTTPServer(("0.0.0.0", PORT), HoneypotHandler)
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n[+] Servidor detenido")
+``
